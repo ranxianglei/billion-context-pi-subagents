@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
-import { createSubagentsExtension } from "../src/index.js";
+import { createSubagentsExtension, markEmbedded } from "../src/index.js";
 
 // billion-context-pi #409: the `delegate: false` escape hatch for users who bring
 // their own sub-agent extension must remove BOTH halves of the acp_delegate
@@ -97,6 +97,7 @@ test("delegate toggle: default config keeps the acp_delegate tools and prompt se
         const { tools, systemPrompt } = await boot(api, handlers, cwd);
         for (const name of DELEGATE_TOOLS) assert.ok(tools.includes(name), `${name} registered by default`);
         assert.ok(systemPrompt.includes(DELEGATE_PROMPT_MARKER), "delegate prompt section present by default");
+        assert.ok(api.commands.has("acp-fleet"), "/acp-fleet registered at session start");
     });
 });
 
@@ -133,5 +134,21 @@ test("delegate toggle: project acp.json wins over global in both directions", as
         const { tools, systemPrompt } = await boot(api, handlers, cwd);
         assert.ok(tools.includes("acp_delegate"), "project delegate:true must override global delegate:false");
         assert.ok(systemPrompt.includes(DELEGATE_PROMPT_MARKER));
+    });
+});
+
+test("embedded marker: a bundled host stands this extension down entirely", async () => {
+    await withConfigs(undefined, undefined, async (cwd) => {
+        const { api, handlers } = captureApi();
+        createSubagentsExtension({ ...ADAPTER })(api as any);
+        markEmbedded();
+        try {
+            const { tools, systemPrompt } = await boot(api, handlers, cwd);
+            for (const name of DELEGATE_TOOLS) assert.ok(!tools.includes(name), `${name} must not be double-registered`);
+            assert.ok(!api.commands.has("acp-fleet"), "standalone /acp-fleet must stand down");
+            assert.equal(systemPrompt, "BASE", "no prompt append when embedded");
+        } finally {
+            delete (globalThis as Record<symbol, unknown>)[Symbol.for("acp-delegate.embedded")];
+        }
     });
 });

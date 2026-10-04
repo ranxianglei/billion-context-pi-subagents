@@ -1,9 +1,10 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getDelegateUsage } from "./delegate-tool.js";
 
-const FOOTER_STATUS_KEY = "billion-context-pi-subagents";
+const DEFAULT_FOOTER_STATUS_KEY = "billion-context-pi-subagents";
 let ui: ExtensionContext["ui"] | undefined;
 let lastFooterText: string | undefined = "";
+let footerStatusKey = DEFAULT_FOOTER_STATUS_KEY;
 
 /** Mirrors pi's footer.js formatTokens: lowercase k/M, thresholds <1000/<10000/<1e6/<1e7. */
 export function formatCompactTokens(count: number): string {
@@ -14,8 +15,9 @@ export function formatCompactTokens(count: number): string {
   return `${Math.round(count / 1000000)}M`;
 }
 
-export function initFooterStatus(ctx: ExtensionContext): void {
+export function initFooterStatus(ctx: ExtensionContext, key?: string): void {
   ui = ctx.ui;
+  footerStatusKey = key ?? DEFAULT_FOOTER_STATUS_KEY;
   lastFooterText = undefined;
 }
 
@@ -32,7 +34,7 @@ export function updateFooterStatus(): void {
   if ((text ?? "") === lastFooterText) return;
   lastFooterText = text ?? "";
   try {
-    ui.setStatus(FOOTER_STATUS_KEY, text);
+    ui.setStatus(footerStatusKey, text);
   } catch {
     // session is tearing down — best effort
   }
@@ -41,7 +43,7 @@ export function updateFooterStatus(): void {
 export function disposeFooterStatus(): void {
   if (ui) {
     try {
-      ui.setStatus(FOOTER_STATUS_KEY, undefined);
+      ui.setStatus(footerStatusKey, undefined);
     } catch {
       // best effort
     }

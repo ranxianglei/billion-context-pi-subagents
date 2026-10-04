@@ -16,11 +16,15 @@
 | **billion-context-pi-subagents** (this) | Sub-agent delegation (`acp_delegate*` + fleet inspector) |
 | [billion-context](https://github.com/ranxianglei/billion-context) | Multi-host proxy launcher (opencode/omp/…) — no code sharing with this package; its "subagent" support tracks opencode-native task sessions only |
 
-**Recommended:** install both. The delegate children spawn plain `pi` processes — with billion-context-pi installed they get ACP compression themselves (long delegate tasks survive large contexts), and its `/acp-subagents` command remains available if you also run a third-party sub-agent extension. This package works standalone without it, but children then rely on Pi's native context management.
+**billion-context-pi bundles this package.** Since the split (#612), billion-context-pi pins this package as an exact devDependency and inlines it into its dist at build time (the same mechanism it uses for acp-kernel). If you use billion-context-pi you already have `acp_delegate` — **do not install this package separately**. If both end up loaded, the standalone copy detects the bundled copy at session start and stands down automatically (no duplicate tools or prompt sections).
 
-The two packages are independent extensions that coexist in one Pi process: they share the same `acp.json` convention (each reads only its own keys) and the same log file (`~/.pi/acp.log`).
+Install this package directly only if you want delegation **without** billion-context-pi: the delegate children then rely on Pi's native context management instead of ACP compression, and the `/acp-subagents` command is not available.
+
+When the two run together they coexist in one Pi process: same `acp.json` convention (each reads only its own keys) and same log file (`~/.pi/acp.log`).
 
 ## Install
+
+**billion-context-pi users: skip this — it is already bundled.** This install is only for standalone use without billion-context-pi:
 
 ```bash
 pi install npm:billion-context-pi-subagents
@@ -28,7 +32,7 @@ pi install npm:billion-context-pi-subagents
 
 No configuration needed — delegates are enabled by default. Restart Pi after installing.
 
-> ⚠️ **v0.1.x has no auto-update.** The parent package's startup updater covers itself only; upgrade this one manually (`pi install npm:billion-context-pi-subagents@latest` or re-install) when a new release lands.
+> ⚠️ **v0.1.x has no auto-update.** Standalone installs must be upgraded manually (`pi install npm:billion-context-pi-subagents@latest` or re-install). The copy bundled inside billion-context-pi updates with billion-context-pi releases.
 
 ## Model-facing tools
 

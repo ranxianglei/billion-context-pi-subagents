@@ -18,11 +18,15 @@
 | **billion-context-pi-subagents**（本包） | 子代理委派（`acp_delegate*` + 集群检查器） |
 | [billion-context](https://github.com/ranxianglei/billion-context) | 多主机代理启动器（opencode/omp/…）— 与本包无代码共享；其"subagent"支持仅跟踪 opencode 原生任务会话 |
 
-**推荐：** 两个包都安装。委派的子进程会启动普通的 `pi` 进程 — 安装了 billion-context-pi 后，它们自身也能获得 ACP 压缩能力（长委派任务可应对大上下文），并且如果你同时运行了第三方子代理扩展，其 `/acp-subagents` 命令仍然可用。本包可以独立工作，但此时子进程将依赖 Pi 的原生上下文管理。
+**billion-context-pi 已内置本包。** 拆分（#612）之后，billion-context-pi 将本包以精确版本钉死为 devDependency，并在构建时内联进其 dist（与内联 acp-kernel 同一机制）。如果你在使用 billion-context-pi，就已经拥有 `acp_delegate` —— **请勿再单独安装本包**。若两者同时被加载，独立副本会在会话开始时检测到内置副本并自动让位（不会重复注册工具或提示词段落）。
 
-这两个包是独立的扩展，共存于同一个 Pi 进程中：它们共享相同的 `acp.json` 约定（各自只读取自己的键）和同一个日志文件（`~/.pi/acp.log`）。
+只有当你想**不装** billion-context-pi 而单独使用委派功能时才直接安装本包：此时委派的子进程依赖 Pi 的原生上下文管理而非 ACP 压缩，且没有 `/acp-subagents` 命令可用。
+
+两包同时运行时共存于同一个 Pi 进程中：相同的 `acp.json` 约定（各自只读取自己的键）和同一个日志文件（`~/.pi/acp.log`）。
 
 ## 安装
+
+**billion-context-pi 用户：跳过此步 —— 已内置。** 此安装仅适用于不装 billion-context-pi 的独立使用：
 
 ```bash
 pi install npm:billion-context-pi-subagents
@@ -30,7 +34,7 @@ pi install npm:billion-context-pi-subagents
 
 无需配置 — 委派功能默认启用。安装后重启 Pi。
 
-> ⚠️ **v0.1.x 没有自动更新。** 父包的启动更新器仅覆盖自身；当新版本发布时请手动升级本包（`pi install npm:billion-context-pi-subagents@latest` 或重新安装）。
+> ⚠️ **v0.1.x 没有自动更新。** 独立安装需手动升级（`pi install npm:billion-context-pi-subagents@latest` 或重新安装）；内置于 billion-context-pi 的副本随 billion-context-pi 发版更新。
 
 ## 面向模型的工具
 

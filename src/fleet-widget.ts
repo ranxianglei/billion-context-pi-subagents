@@ -117,14 +117,14 @@ function refresh(): void {
 }
 
 export const delegateStatusWidget = {
-  setContext(ctx: ExtensionContext, snapshot: RunsSnapshot, shortcut?: string): void {
+  setContext(ctx: ExtensionContext, snapshot: RunsSnapshot, shortcut?: string, footerKey?: string): void {
     // Only the interactive TUI renders widgets. RPC mode has hasUI === true but
     // its setWidget just emits extension_ui_request notifications to an RPC
     // client — useless here and a needless ~1Hz chatter. print/json have
     // hasUI === false. Guard on the mode directly (types.d.ts: "Use \"tui\" to
     // guard terminal-only UI").
     if (ctx.mode !== "tui") return;
-    initFooterStatus(ctx);
+    initFooterStatus(ctx, footerKey);
     ui = ctx.ui;
     runsSnapshot = snapshot;
     fleetShortcut = shortcut ?? "";

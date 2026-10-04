@@ -103,3 +103,13 @@ test("updateFooterStatus does not churn setStatus across repeated empty ticks", 
   assert.deepEqual(mock.calls[1], ["billion-context-pi-subagents", "sub-agents \u219112k \u219331 ($0.0016)"]);
   disposeFooterStatus();
 });
+
+test("initFooterStatus accepts a custom status key (embedded hosts keep their own key)", () => {
+  const mock = makeMock();
+  resetDelegateUsage();
+  addDelegateUsage(USAGE);
+  initFooterStatus(mock.ctx, "billion-context-pi");
+  updateFooterStatus();
+  assert.deepEqual(mock.calls, [["billion-context-pi", "sub-agents \u219112k \u219331 ($0.0016)"]]);
+  disposeFooterStatus();
+});
