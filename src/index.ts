@@ -46,7 +46,13 @@ export function markEmbedded(): void {
   (globalThis as Record<symbol, unknown>)[EMBEDDED_GLOBAL_KEY] = true;
 }
 
-function isEmbedded(): boolean {
+/** Whether THIS process already has an acp_delegate owner (an embedder that
+ *  called markEmbedded(), e.g. billion-context-pi or billion-context's pi
+ *  lane). Exported so embedders can implement check-before-claim: whoever
+ *  wires the delegate surface first owns it process-wide, and a second
+ *  embedder must stand down instead of double-registering tools, prompt
+ *  sections and widgets. */
+export function isEmbedded(): boolean {
   return (globalThis as Record<symbol, unknown>)[EMBEDDED_GLOBAL_KEY] === true;
 }
 
@@ -206,6 +212,7 @@ export {
   resolveDelegate,
   DEFAULT_DELEGATE_POLICY,
   DEFAULT_FLEET_SHORTCUT,
+  loadSubagentsUserConfig,
   type DelegateRoleConfig,
   type DelegateConfig,
   type DelegatePolicy,
