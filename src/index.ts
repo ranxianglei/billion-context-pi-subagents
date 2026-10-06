@@ -213,10 +213,13 @@ export {
   DEFAULT_DELEGATE_POLICY,
   DEFAULT_FLEET_SHORTCUT,
   loadSubagentsUserConfig,
+  piSubagentsToAdapter,
+  biliConfigFile,
   type DelegateRoleConfig,
   type DelegateConfig,
   type DelegatePolicy,
   type SubagentsAdapterConfig,
+  type PiSubagentsFileSection,
 } from "./config.js";
 export { ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 export { delegateStatusWidget } from "./fleet-widget.js";
