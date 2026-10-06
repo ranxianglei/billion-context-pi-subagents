@@ -67,15 +67,45 @@ Read-only roles receive a restricted tool allowlist plus ACP context tools so th
 
 ## Configuration
 
-Same file convention as billion-context-pi: `~/.pi/acp.json` (global) and `<project>/.pi/acp.json` (project overrides global). This package reads only the keys below; all other keys in the same file belong to other packages and are ignored here.
+Since #2230 (config-home) the primary source is **billion-context's own config file** — `~/.config/billion-context/billion-context.json` (relocatable via `BILI_CONFIG_FILE` / `XDG_CONFIG_HOME`, same resolution as the `bili` proxy) — under the `pi.subagents` section:
+
+```json
+{
+  "pi": {
+    "subagents": {
+      "enabled": true,
+      "maxDepth": 2,
+      "maxConcurrent": 3,
+      "syncTimeoutMinutes": 5,
+      "idleTimeoutMinutes": 5,
+      "asyncTimeoutMinutes": 30,
+      "thinkingLevel": "medium",
+      "notifyIfRead": "skip",
+      "displayUsage": "separate",
+      "forceEnable": false,
+      "fleetShortcut": "ctrl+alt+d",
+      "prompt": null,
+      "debug": false,
+      "agents": {
+        "reviewer": { "model": "anthropic/claude-sonnet-4-5", "thinkingLevel": "high" },
+        "worker":   { "model": "zhipu/glm-4.7" }
+      }
+    }
+  }
+}
+```
+
+Every field means the same as the `delegate.*` key of the same name in the legacy table below, with two renames: `delegatePrompt` → `prompt`, and `debug` is scoped to the sub-agent subsystem (it does **not** collide with billion-context.json's top-level proxy `debug` key). Boolean shorthand: `"pi": { "subagents": false }` disables the whole surface. When the section exists it **owns** the delegate config — legacy acp.json keys are ignored with a warning. The embedded `bili` pi lane reads the same section (documented in billion-context's CONFIGURATION.md); the file format is the contract between the two.
+
+### Legacy: acp.json (deprecated)
+
+The original home was `~/.pi/acp.json` (global) and `<project>/.pi/acp.json` (project overrides global). These four keys are **deprecated** — still read while the `pi.subagents` section is absent (with a one-time warning in `~/.pi/acp.log`), ignored once it exists, and slated for removal in a future release:
 
 ```json
 { "delegate": false }
-```
 
 or object form:
 
-```json
 {
   "delegate": {
     "enabled": true,
@@ -115,7 +145,7 @@ or object form:
 | `delegatePrompt` | string \| null | built-in | Replace (string) or remove (`null`) the `ACP_DELEGATE NOTIFICATIONS` system-prompt appendix. |
 | `debug` | boolean | `false` | Debug-level events in `~/.pi/acp.log` (shared with billion-context-pi). Env `ACP_DEBUG=1` too. |
 
-Invalid values never fail the session — they warn in `~/.pi/acp.log` and fall back to defaults. Precedence: env > project acp.json > global acp.json > default.
+Invalid values never fail the session — they warn in `~/.pi/acp.log` and fall back to defaults. Precedence: env > `pi.subagents` (billion-context.json) > project acp.json > global acp.json > default.
 
 A change to any `delegate.*` key takes effect on a **new session** (tools register at session start).
 
@@ -125,7 +155,7 @@ If you also run [pi-subagents](https://github.com/nicobailon/pi-subagents) (or s
 
 - **Project-scope install** (`<cwd>/.pi/npm/node_modules/pi-subagents` or `<cwd>/.pi/extensions/pi-subagents`) → `acp_delegate` **stands down automatically** for that project (tools, shortcut and prompt section skipped); a reminder points at `/acp-subagents` (from billion-context-pi) so the third-party agents still get ACP compression.
 - **User-scope-only install** (`~/.pi/npm`, user extensions dir) → `acp_delegate` stays active; a warning is logged instead.
-- Keep both anyway: `{ "delegate": { "forceEnable": true } }`.
+- Keep both anyway: `pi.subagents.forceEnable: true` (legacy acp.json: `{ "delegate": { "forceEnable": true } }`).
 - Drop this package entirely: `pi remove npm:billion-context-pi-subagents`.
 
 Pi's `--exclude-tools acp_delegate,acp_delegate_wait,acp_delegate_cancel` is **not** a substitute for `delegate: false`: it hides the tools but the model still receives the `ACP_DELEGATE NOTIFICATIONS` section describing tools it cannot call.

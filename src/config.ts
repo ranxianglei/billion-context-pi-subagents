@@ -131,9 +131,11 @@ export const DEFAULT_DELEGATE_POLICY: DelegatePolicy = {
   fleetShortcut: DEFAULT_FLEET_SHORTCUT,
 };
 
-/** The acp.json slice this package reads. Project-level acp.json overrides
- *  global; unknown keys (including billion-context-pi's compression keys) are
- *  ignored by both packages. */
+/** The user-config slice this package reads (#2230 config-home): primarily
+ *  the `pi.subagents` section of billion-context.json (via
+ *  loadSubagentsUserConfig); the acp.json keys below are a deprecated
+ *  fallback. Unknown keys (including billion-context-pi's compression keys)
+ *  are ignored by both packages. */
 export interface SubagentsAdapterConfig {
   /** Delegate sub-agent config. Accepts a boolean shorthand (`true` →
    *  `{ enabled: true }`, `false` → `{ enabled: false }`) or a DelegateConfig
@@ -249,11 +251,111 @@ function resolveMaxConcurrent(envValue: string | undefined, cfgValue: number | u
 
 const KNOWN_KEYS = new Set(["delegate", "displayUsage", "delegatePrompt", "debug"]);
 
+/** The `pi.subagents` section of billion-context.json (#2230 config-home):
+ *  the primary home for this package's user config. Field semantics are
+ *  identical to DelegateConfig with two renames — `prompt` replaces
+ *  `delegatePrompt`, and `debug` is scoped to the sub-agent subsystem (it
+ *  does not collide with billion-context.json's top-level proxy `debug`).
+ *  Accepts a boolean shorthand at the read site (`false` → disabled surface,
+ *  `true` → all defaults). */
+export interface PiSubagentsFileSection extends DelegateConfig {
+  /** pi.subagents name for `delegatePrompt` — replace (string) or remove
+   *  (null) the ACP_DELEGATE NOTIFICATIONS appendix. */
+  prompt?: string | null;
+  /** Enable debug-level events in the shared ACP log (~/.pi/acp.log).
+   *  Scoped: unrelated to the top-level proxy `debug` key. */
+  debug?: boolean;
+}
+
+/** Path of billion-context.json, mirroring bili's src/paths.ts resolution
+ *  exactly (BILI_CONFIG_FILE > XDG_CONFIG_HOME > ~/.config) so this package
+ *  and bili's own loader always agree on which file is authoritative — the
+ *  file format (documented in billion-context CONFIGURATION.md) is the
+ *  contract between the two, not shared code. */
+export function biliConfigFile(): string {
+  const env = process.env.BILI_CONFIG_FILE;
+  if (env && env.length > 0) return path.resolve(env);
+  const xdg = process.env.XDG_CONFIG_HOME;
+  const base = xdg && xdg.length > 0 ? path.resolve(xdg) : path.join(homedir(), ".config");
+  return path.join(base, "billion-context", "billion-context.json");
+}
+
+/** Map a `pi.subagents` section (or boolean shorthand) onto the adapter
+ *  shape resolveDelegate() consumes. Pure + exported for tests and for
+ *  embedders that read the section through their own config loader. */
+export function piSubagentsToAdapter(section: PiSubagentsFileSection | boolean): SubagentsAdapterConfig {
+  if (section === false) return { delegate: { enabled: false } };
+  if (section === true) return {};
+  const { prompt, debug, ...delegate } = section;
+  const adapter: SubagentsAdapterConfig = {};
+  if (Object.keys(delegate).length > 0) adapter.delegate = delegate;
+  if (prompt !== undefined) adapter.delegatePrompt = prompt;
+  if (debug !== undefined) adapter.debug = debug;
+  return adapter;
+}
+
+/** Read the `pi.subagents` section of billion-context.json. undefined = no
+ *  section (caller falls back to the deprecated acp.json keys); a malformed
+ *  file or non-object section also degrades to undefined with a warning —
+ *  bili's own loader reports parse errors on its surface, this one never
+ *  fails the session. */
+async function readBiliPiSubagents(): Promise<PiSubagentsFileSection | boolean | undefined> {
+  const file = biliConfigFile();
+  let raw: string;
+  try {
+    raw = await fs.readFile(file, "utf8");
+  } catch {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw.replace(/^\uFEFF/, ""));
+  } catch (e) {
+    logWarn("config", { event: "bili-config-unparsable", file, error: e instanceof Error ? e.message : String(e), fallback: "legacy acp.json keys" });
+    return undefined;
+  }
+  const pi = parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>).pi : undefined;
+  const section = pi !== null && typeof pi === "object" ? (pi as Record<string, unknown>).subagents : undefined;
+  if (section === undefined || section === null) return undefined;
+  if (typeof section === "boolean") return section;
+  if (typeof section !== "object" || Array.isArray(section)) {
+    logWarn("config", { event: "pi-subagents-invalid", file, reason: "pi.subagents must be an object or a boolean", fallback: "legacy acp.json keys" });
+    return undefined;
+  }
+  return section as PiSubagentsFileSection;
+}
+
+// One-shot deprecation warnings: repeated session starts must not re-log.
+let warnedAcpJsonIgnored = false;
+let warnedAcpJsonDeprecated = false;
+
 /** Read global + project acp.json (project overrides global) and pick the keys
- *  this package owns. Returns {} on any error (missing file, bad JSON) — never
- *  throws. Malformed-but-repairable files are salvaged with a loud warning
- *  instead of silently meaning "no config" (billion-context-pi #467 parity). */
+ *  this package owns — the four keys are DEPRECATED since #2230 moved the
+ *  config home to billion-context.json `pi.subagents`. Returns {} on any
+ *  error (missing file, bad JSON) — never throws. Malformed-but-repairable
+ *  files are salvaged with a loud warning instead of silently meaning "no
+ *  config" (billion-context-pi #467 parity). */
 export async function loadSubagentsUserConfig(cwd: string): Promise<SubagentsAdapterConfig> {
+  const legacy = await readLegacyAcpJsonKeys(cwd);
+  const legacyHasKeys = Object.keys(legacy).length > 0;
+  const section = await readBiliPiSubagents();
+  if (section !== undefined) {
+    // The section OWNS the config: acp.json keys are ignored (not merged) so
+    // there is exactly one place a user needs to look.
+    if (legacyHasKeys && !warnedAcpJsonIgnored) {
+      warnedAcpJsonIgnored = true;
+      logWarn("config", { event: "acp-json-delegate-keys-ignored", reason: "pi.subagents in billion-context.json owns the delegate config; the acp.json delegate/delegatePrompt/displayUsage/debug keys are ignored", migration: 'move them to the "pi": {"subagents": {…}} section of ~/.config/billion-context/billion-context.json' });
+    }
+    return piSubagentsToAdapter(section);
+  }
+  if (legacyHasKeys && !warnedAcpJsonDeprecated) {
+    warnedAcpJsonDeprecated = true;
+    logWarn("config", { event: "acp-json-delegate-keys-deprecated", reason: "delegate config in acp.json is deprecated and will be removed in a future release", migration: 'move delegate/delegatePrompt/displayUsage/debug to the "pi": {"subagents": {…}} section of ~/.config/billion-context/billion-context.json (delegatePrompt renames to prompt)' });
+  }
+  return legacy;
+}
+
+async function readLegacyAcpJsonKeys(cwd: string): Promise<SubagentsAdapterConfig> {
   const home = homedir();
   const merged: SubagentsAdapterConfig = {};
   for (const base of [path.join(home, CONFIG_DIR_NAME), path.join(cwd, CONFIG_DIR_NAME)]) {
