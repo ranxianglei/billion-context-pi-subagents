@@ -26,12 +26,12 @@ const SETTLED_GRACE_MS = 10_000;
 const KILL_GRACE_MS = 10_000;
 const RESULT_SUMMARY_CHARS = 500;
 export const OUT_DIR = join(tmpdir(), "acp-delegate");
-// Coalesce completion notifications: each sendUserMessage follow-up costs a
-// full model turn, so N near-simultaneous finishes merge into ONE message
-// (issue #157). The trailing window (NOTIFY_COALESCE_MS) never extends more
-// than NOTIFY_COALESCE_MAX_MS past the first queued completion.
-const NOTIFY_COALESCE_MS = 2_000;
-const NOTIFY_COALESCE_MAX_MS = 10_000;
+// Completion notifications are committed when the host agent settles (goes
+// idle), not on a fixed timer (#2301): a fixed delay can fire before the model
+// has read the result file, committing an irrevocable follow-up that a later
+// read cannot recall. Finishes that land before the next settle still merge
+// into ONE message (issue #157) because they share the same settle-triggered
+// flush.
 const SESSION_EXT = ".session.jsonl";
 const ACTIVITY_TAIL_CHARS = 400;
 
@@ -694,6 +694,7 @@ const agentListLine = (name: string): string => {
 };
 
 export function makeDelegateTool(pi: ExtensionAPI): ToolDefinition<typeof DelegateParams> {
+  ensureHostSettleHandlers(pi);
   const maxConcurrent = delegatePolicy.maxConcurrent;
   const concurrencyNote = Number.isFinite(maxConcurrent)
     ? `\n• Concurrency limit: at most ${maxConcurrent} background delegate(s) run at once; extra launches stay QUEUED and start automatically as slots free. Set delegate.maxConcurrent in acp.json (or PI_ACP_DELEGATE_MAX_CONCURRENT) to change it.`
@@ -813,34 +814,73 @@ function undeliveredNotice(excludeRunId?: string): string {
   return undeliveredNoticeFrom(Array.from(runs.values()), excludeRunId);
 }
 
-// ─── Coalesced completion notifications (#157) ─────────────────────────────
+// ─── Settle-gated completion notifications (#157, #2301) ───────────────────
 // Each injected notification is a follow-up turn for the model; delegates that
 // finish close together must share ONE message instead of piling up in the
-// queue. A trailing-edge debounce (reset by every new completion, capped at
-// NOTIFY_COALESCE_MAX_MS from the first) batches simultaneous finishers while
-// keeping worst-case delivery latency low.
+// queue. Committing is gated on the host agent settling (going idle) rather
+// than a fixed timer: at the settle boundary every read performed this round
+// has already been observed, so the flush can drop result files the model
+// already read (notifyIfRead "skip") and only deliver what it did not. A fixed
+// delay would commit an irrevocable follow-up before a later read lands, with
+// no API to recall it (#2301). Runs finishing while the host is idle are
+// delivered promptly so the async "launch and wait" pattern still wakes the
+// model without waiting for unrelated activity.
 
 let notifyPi: ExtensionAPI | undefined;
 const notifyQueue: DelegateRun[] = [];
-let notifyTimer: ReturnType<typeof setTimeout> | undefined;
-let notifyWindowStart = 0;
+let flushScheduled = false;
+/** Host agent runs currently in flight (agent_start .. agent_settled). Zero
+ *  means the host is idle, which is when it is safe to commit pending
+ *  notifications. */
+let hostAgentRuns = 0;
 
-/** Queue a finished run's completion notification for coalesced delivery.
- *  The flush timer is re-armed (trailing edge) on every call so runs that
- *  finish together share one message; see NOTIFY_COALESCE_MS. */
+const settleHandlerPis = new WeakSet<ExtensionAPI>();
+
+/** Register the host-lifecycle handlers that drive notification commits.
+ *  Called from makeDelegateTool, which every delegate owner (the standalone
+ *  factory AND each embedder) invokes at setup, so the settle hook reaches all
+ *  wiring paths without any embedder-side change. Guarded per pi instance so
+ *  repeated tool registration does not double-count host runs. */
+function ensureHostSettleHandlers(pi: ExtensionAPI): void {
+  // Tolerate a partial extension surface (some embedders/tests stub only the
+  // methods they use): without lifecycle events we still deliver via the
+  // idle-at-finish path, so degrade instead of failing tool registration.
+  if (typeof pi.on !== "function") return;
+  if (settleHandlerPis.has(pi)) return;
+  settleHandlerPis.add(pi);
+  pi.on("agent_start", () => {
+    hostAgentRuns += 1;
+  });
+  pi.on("agent_settled", () => {
+    if (hostAgentRuns > 0) hostAgentRuns -= 1;
+    maybeFlushNotifications();
+  });
+}
+
+/** Schedule a read-checked flush on the next macrotask if the host is idle.
+ *  Deferred (setTimeout 0) so the sendUserMessage-driven turn starts only after
+ *  the settling finally has fully unwound, avoiding two overlapping agent runs.
+ *  At most one flush is ever pending, so same-tick finishes coalesce into one. */
+function maybeFlushNotifications(): void {
+  if (hostAgentRuns > 0) return;
+  if (flushScheduled) return;
+  flushScheduled = true;
+  const t = setTimeout(() => {
+    flushScheduled = false;
+    flushDelegateNotifications();
+  }, 0);
+  t.unref?.();
+}
+
+/** Queue a finished run's completion notification for settle-gated delivery.
+ *  Runs that finish before the next settle share one batched message (#157). If
+ *  the host is already idle the flush is scheduled immediately; otherwise it
+ *  waits for the next agent_settled, which re-checks reads before committing. */
 export function scheduleRunNotification(pi: ExtensionAPI, run: DelegateRun): void {
   if (!notifyQueue.includes(run)) notifyQueue.push(run);
   run.notifyQueued = true;
   notifyPi = pi;
-  const now = Date.now();
-  if (!notifyWindowStart) notifyWindowStart = now;
-  const delay = Math.max(0, Math.min(NOTIFY_COALESCE_MS, NOTIFY_COALESCE_MAX_MS - (now - notifyWindowStart)));
-  if (notifyTimer) clearTimeout(notifyTimer);
-  notifyTimer = setTimeout(() => {
-    notifyTimer = undefined;
-    flushDelegateNotifications();
-  }, delay);
-  notifyTimer.unref?.();
+  maybeFlushNotifications();
 }
 
 /** Deliver every undelivered terminal run (queued + any earlier lost ones) as
@@ -849,17 +889,24 @@ export function scheduleRunNotification(pi: ExtensionAPI, run: DelegateRun): voi
  *  On send failure nothing is marked delivered, so a later carrier recovers
  *  the batch via the normal undelivered-notice mechanism. */
 export function flushDelegateNotifications(): void {
-  if (notifyTimer) {
-    clearTimeout(notifyTimer);
-    notifyTimer = undefined;
-  }
-  notifyWindowStart = 0;
   const queued = new Set(notifyQueue.splice(0));
   for (const r of queued) r.notifyQueued = false;
   const pi = notifyPi;
   if (!pi) return;
-  const owned = (r: DelegateRun): boolean =>
-    !r.waiter && !r.consumed && !r.injected && (r.status === "completed" || r.status === "failed");
+  const owned = (r: DelegateRun): boolean => {
+    if (r.waiter || r.consumed || r.injected) return false;
+    if (r.status !== "completed" && r.status !== "failed") return false;
+    // Read-check at commit time (#2301): delivery is decided HERE, at the settle
+    // boundary, so a completed run whose result file the model already read
+    // (at/after finish) is dropped instead of committed — not just reads that
+    // preceded some earlier fixed timer. Failed runs are never suppressed (their
+    // file holds no failure marker; failures stay loud).
+    if (r.status === "completed" && shouldSuppressRead(r, delegateNotifyIfRead)) {
+      applyReadSuppression(r, r.runId);
+      return false;
+    }
+    return true;
+  };
   const deliverable: DelegateRun[] = [];
   const seen = new Set<DelegateRun>();
   for (const r of queued) {
@@ -1819,14 +1866,26 @@ export function shouldSuppressRead(
  *  mark it delivered (so wait/recovery/flush never re-surface the result),
  *  account its usage in separate mode, and log the skip. Idempotent. */
 export function applyReadSuppression(run: DelegateRun, runId: string): void {
+  if (run.readSuppressed) return;
+  // Distinguish a genuine suppression (the read landed before the commit
+  // decision, so no notification goes out) from a read that arrived only AFTER
+  // the notification was already committed — the latter cannot be recalled and
+  // is logged separately so it is not mistaken for a working suppression
+  // (#2301). Settle-gating makes this second case rare.
+  const committedBeforeRead = run.injected === true;
   run.readSuppressed = true;
   run.injected = true;
   if (run.usage && !run.usageReported && delegateDisplayUsage === "separate") {
     addDelegateUsage(run.usage);
     run.usageReported = true;
   }
-  debug.event("delegate-inject-suppressed", { runId, reason: "result-file-read", readAt: run.readAt, finishedAt: run.finishedAt });
-  logInfo("delegate", { event: "inject-suppressed", runId, reason: "result-file-read", readAt: run.readAt, finishedAt: run.finishedAt });
+  if (committedBeforeRead) {
+    debug.event("delegate-read-after-commit", { runId, reason: "result-file-read", readAt: run.readAt, finishedAt: run.finishedAt });
+    logInfo("delegate", { event: "read-after-commit", runId, reason: "result-file-read", readAt: run.readAt, finishedAt: run.finishedAt });
+  } else {
+    debug.event("delegate-inject-suppressed", { runId, reason: "result-file-read", readAt: run.readAt, finishedAt: run.finishedAt });
+    logInfo("delegate", { event: "inject-suppressed", runId, reason: "result-file-read", readAt: run.readAt, finishedAt: run.finishedAt });
+  }
 }
 
 /** Apply read-suppression immediately when a qualifying read just happened.
