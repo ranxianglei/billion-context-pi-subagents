@@ -68,7 +68,9 @@ test("read-before-settle drops the notification (the #2301 stale-follow-up)", as
   await sleep(30);
   assert.equal(sent.length, 0, "nothing committed while the host is busy");
   emit("agent_settled"); // host goes idle -> read-checked commit boundary
-  await sleep(30);
+  // #8: the read-check happens inside the deferred setTimeout(0) flush — poll
+  // for its effect instead of assuming it landed within a fixed sleep window.
+  await waitFor(() => run.readSuppressed === true, "read-check at settle");
   assert.equal(sent.length, 0, "already-read result is NOT injected");
   assert.equal(run.readSuppressed, true, "recorded as suppressed, not delivered");
 });
