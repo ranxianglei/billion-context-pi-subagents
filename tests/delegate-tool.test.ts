@@ -884,7 +884,7 @@ test("acp_delegate resumeFrom copies the original session into the new run's fil
 
 // ─── coalesced completion notifications (#157) ──────────────────────────────
 // N delegates finishing near-simultaneously must share ONE injected message
-// (each sendUserMessage follow-up costs a model turn), and runs that were
+// (each injected notification costs a model turn), and runs that were
 // delivered by other means while queued (wait/cancel) drop out of the batch.
 
 test("flushDelegateNotifications coalesces queued runs into a single message", () => {
@@ -948,6 +948,23 @@ test("single undelivered run flushes through the legacy single-run format", () =
   assert.ok(text.includes("`del_solo`"), "names the run");
   assert.ok(!text.includes("delegates finished ("), "no batch header for a single run");
   assert.equal(a.injected, true);
+});
+
+test("completion notifications are injected as steering on both paths (#2320)", () => {
+  const sent: string[] = [];
+  const opts: unknown[] = [];
+  const pi = { sendUserMessage: (t: string, o?: unknown) => { sent.push(t); opts.push(o); } };
+  // single path: direct injectResult
+  const ok = injectResult(pi as any, "reviewer", "del_steer", "review X", "completed", 0, "/tmp/del_steer.out");
+  assert.equal(ok, true, "single-path injection succeeds");
+  // batch path: two queued runs coalesce into one message
+  const a = mkRun("del_steer_a", "completed", { result: { code: 0, file: "/tmp/del_steer_a.out", body: "ok" } });
+  const b = mkRun("del_steer_b", "failed");
+  scheduleRunNotification(pi as any, a);
+  scheduleRunNotification(pi as any, b);
+  flushDelegateNotifications();
+  assert.equal(sent.length, 2, "one single-path + one coalesced batch message");
+  assert.deepEqual(opts, [{ deliverAs: "steer" }, { deliverAs: "steer" }], "both paths steer, never followUp");
 });
 
 test("findUndeliveredRuns excludes queued runs (scheduled is not lost)", () => {

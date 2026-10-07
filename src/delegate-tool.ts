@@ -814,17 +814,24 @@ function undeliveredNotice(excludeRunId?: string): string {
   return undeliveredNoticeFrom(Array.from(runs.values()), excludeRunId);
 }
 
-// ─── Settle-gated completion notifications (#157, #2301) ───────────────────
-// Each injected notification is a follow-up turn for the model; delegates that
-// finish close together must share ONE message instead of piling up in the
-// queue. Committing is gated on the host agent settling (going idle) rather
-// than a fixed timer: at the settle boundary every read performed this round
-// has already been observed, so the flush can drop result files the model
-// already read (notifyIfRead "skip") and only deliver what it did not. A fixed
-// delay would commit an irrevocable follow-up before a later read lands, with
-// no API to recall it (#2301). Runs finishing while the host is idle are
+// ─── Settle-gated completion notifications (#157, #2301, #2320) ────────────
+// Each injected notification is a turn for the model; delegates that finish
+// close together must share ONE message instead of piling up in the queue.
+// COMMIT timing is gated on the host agent settling (going idle) rather than
+// a fixed timer: at the settle boundary every read performed this round has
+// already been observed, so the flush can drop result files the model already
+// read (notifyIfRead "skip") and only deliver what it did not. A fixed delay
+// would commit an irrevocable notification before a later read lands, with no
+// API to recall it (#2301). Runs finishing while the host is idle are
 // delivered promptly so the async "launch and wait" pattern still wakes the
 // model without waiting for unrelated activity.
+// The delivery CHANNEL is steering (#2320): if a commit ever happens while
+// the host is still working, the notification is consumed at the next safe
+// boundary — after the current response and its tool calls — instead of only
+// after the task ends; when the host is idle it starts a turn immediately, as
+// before. (Under the settle gate commits currently land at settle/idle, where
+// steer and followUp are equivalent; the channel is what #2320 requires for
+// any mid-task commit.)
 
 let notifyPi: ExtensionAPI | undefined;
 const notifyQueue: DelegateRun[] = [];
@@ -964,7 +971,7 @@ export function flushDelegateNotifications(): void {
   let sent = false;
   if (typeof send === "function") {
     try {
-      send.call(pi, text, { deliverAs: "followUp" });
+      send.call(pi, text, { deliverAs: "steer" });
       sent = true;
     } catch (err) {
       logError("delegate", { event: "notify-batch-error", error: String(err), runIds: deliverable.map((r) => r.runId).join(",") });
@@ -1975,10 +1982,14 @@ export function injectResult(
   const { text: recoveryText, covered } = buildRecoveryNotice(Array.from(runs.values()), runId);
   const text = formatPayload(header, file, task, failed ? body : undefined, failed ? activityFile : undefined) + (recoveryText ? `\n\n${recoveryText}` : "");
   try {
-    // sendUserMessage is fire-and-forget (returns void): it enqueues a
-    // follow-up turn. Interactive/rpc sessions consume it via their main loop;
-    // injection at shutdown is best-effort (no API to await a turn).
-    send.call(pi, text, { deliverAs: "followUp" });
+    // sendUserMessage is fire-and-forget (returns void). deliverAs:"steer"
+    // injects the notification at the next safe boundary — after the current
+    // response and its tool calls finish — so a still-working main agent gets
+    // the result mid-task instead of waiting for the task to end (#2320); when
+    // the agent is idle it starts a turn immediately, as before.
+    // Interactive/rpc sessions consume it via their main loop; injection at
+    // shutdown is best-effort (no API to await a turn).
+    send.call(pi, text, { deliverAs: "steer" });
     // Commit the recovery marking only now: a thrown send above must leave the
     // covered runs undelivered so a later carrier can still recover them.
     for (const r of covered) r.injected = true;
