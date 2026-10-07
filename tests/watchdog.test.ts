@@ -5,6 +5,17 @@ import { attachWatchdogs } from "../src/delegate-watchdog.js";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// #8: poll until an expected event lands instead of asserting at a fixed sleep —
+// fixed-millisecond windows flake under CPU contention. Same deadline-loop
+// convention as delegate-read-suppress.test.ts / fleet-inspector.test.ts.
+async function waitFor(cond: () => boolean, what: string, deadlineMs = 5_000): Promise<void> {
+  const end = Date.now() + deadlineMs;
+  while (!cond()) {
+    if (Date.now() > end) throw new Error(`timed out waiting: ${what}`);
+    await sleep(5);
+  }
+}
+
 interface Harness {
   stdout: EventEmitter;
   kills: NodeJS.Signals[];
@@ -60,7 +71,7 @@ function setup(overrides?: { idleMs?: number | null; timeoutMs?: number | null; 
 
 test("idle watchdog kills with SIGTERM after idleMs without output", async () => {
   const h = setup({ idleMs: 30, killGraceMs: 200 });
-  await sleep(60);
+  await waitFor(() => h.kills.length >= 1, "idle SIGTERM");
   assert.deepEqual(h.kills, ["SIGTERM"], "SIGTERM fired once");
   assert.equal(h.reasons.length, 1, "onKill called once");
   assert.ok(h.reasons[0].includes("no output"), `reason names idle: ${h.reasons[0]}`);
@@ -69,7 +80,7 @@ test("idle watchdog kills with SIGTERM after idleMs without output", async () =>
 
 test("idle watchdog escalates to SIGKILL when the child ignores SIGTERM", async () => {
   const h = setup({ idleMs: 20, killGraceMs: 30 });
-  await sleep(100);
+  await waitFor(() => h.kills.length >= 2, "SIGTERM then SIGKILL");
   assert.deepEqual(h.kills, ["SIGTERM", "SIGKILL"], "SIGTERM then SIGKILL");
   h.watchdog.dispose();
 });
@@ -87,14 +98,14 @@ test("poke resets the idle timer (continuous output never triggers)", async () =
 test("EOF grace force-finalizes when stdout ended but the child lives", async () => {
   const h = setup({ eofGraceMs: 30 });
   h.stdout.emit("end");
-  await sleep(60);
+  await waitFor(() => h.eofGraceCount >= 1, "EOF grace finalization");
   assert.equal(h.eofGraceCount, 1, "onEofGrace fired once");
   h.watchdog.dispose();
 });
 
 test("hard time limit kills regardless of output", async () => {
   const h = setup({ timeoutMs: 40 });
-  await sleep(80);
+  await waitFor(() => h.kills.length >= 1, "hard-limit SIGTERM");
   assert.deepEqual(h.kills, ["SIGTERM"], "time limit fired");
   assert.ok(h.reasons[0].includes("limit"), `reason names limit: ${h.reasons[0]}`);
   h.watchdog.dispose();
@@ -120,7 +131,7 @@ test("settled runs never get killed or grace-finalized", async () => {
 test("settledGrace kills with SIGTERM when the process does not exit in time", async () => {
   const h = setup({ killGraceMs: 200 });
   h.watchdog.settledGrace(30, 200, "agent settled but process did not exit");
-  await sleep(60);
+  await waitFor(() => h.kills.length >= 1, "settledGrace SIGTERM");
   assert.deepEqual(h.kills, ["SIGTERM"], "SIGTERM fired once");
   assert.equal(h.reasons.length, 1, "onKill called once");
   assert.equal(h.reasons[0], "agent settled but process did not exit", "reason forwarded");
@@ -130,7 +141,7 @@ test("settledGrace kills with SIGTERM when the process does not exit in time", a
 test("settledGrace escalates to SIGKILL when the child ignores SIGTERM", async () => {
   const h = setup({ killGraceMs: 30 });
   h.watchdog.settledGrace(20, 30, "agent settled but process did not exit");
-  await sleep(100);
+  await waitFor(() => h.kills.length >= 2, "settledGrace SIGTERM then SIGKILL");
   assert.deepEqual(h.kills, ["SIGTERM", "SIGKILL"], "SIGTERM then SIGKILL");
   h.watchdog.dispose();
 });
@@ -147,7 +158,7 @@ test("settledGrace is idempotent (only one timer is armed)", async () => {
   const h = setup({ killGraceMs: 200 });
   h.watchdog.settledGrace(30, 200, "first");
   h.watchdog.settledGrace(30, 200, "second");
-  await sleep(60);
+  await waitFor(() => h.kills.length >= 1, "settledGrace SIGTERM (idempotent)");
   assert.deepEqual(h.kills, ["SIGTERM"], "single SIGTERM despite double call");
   assert.equal(h.reasons.length, 1, "single onKill");
   assert.equal(h.reasons[0], "first", "first reason wins");
@@ -198,7 +209,7 @@ test("both idleMs and timeoutMs null: only EOF grace remains", async () => {
   await sleep(80);
   assert.equal(h.kills.length, 0, "no time-based kill");
   h.stdout.emit("end");
-  await sleep(60);
+  await waitFor(() => h.eofGraceCount >= 1, "EOF grace with timers disabled");
   assert.equal(h.eofGraceCount, 1, "EOF grace still fires");
   h.watchdog.dispose();
 });
